@@ -38,6 +38,10 @@ class TrajectoryModeling(nn.Module):
 
     def forward(self, seq_info):
         trajectory_features = seq_info["trajectory_features"]
+        # BCPR compares current queries with the raw detector observations. Keep
+        # the pre-adapter tensor available to the ID decoder. The adapter below
+        # rebinds trajectory_features and does not mutate this tensor in place.
+        seq_info["trajectory_features_pre_adapter"] = trajectory_features
         trajectory_features = trajectory_features + self.adapter(trajectory_features)
         trajectory_features = self.norm(trajectory_features)
         trajectory_features = trajectory_features + self.ffn(trajectory_features)

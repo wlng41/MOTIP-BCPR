@@ -1,0 +1,12 @@
+SUPER_CONFIG_PATH: ./configs/bcpr_bft.yaml
+
+# Supply the checkpoint with --inference-model.
+INFERENCE_MODEL:
+INFERENCE_DATASET: BFT
+INFERENCE_SPLIT: test
+INFERENCE_MODE: evaluate
+INFERENCE_GROUP: bcpr_bft
+
+# Evaluation does not use the training dual-path objective.
+BCPR_DUAL_PATH: False
+BCPR_ALPHA: 0.75

@@ -1,0 +1,9 @@
+MOTIP-BCPR
+
+This repository is derived from the official MOTIP implementation:
+https://github.com/MCG-NJU/MOTIP
+
+The upstream source is distributed under the license included in LICENSE. BCPR-specific
+changes add BCPR attention biasing, dual-path identity training, configurations,
+tests, and documentation. Dataset files, pretrained weights, and trained checkpoints are
+not included.

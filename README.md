@@ -1,6 +1,63 @@
-<h1 align="center">
+<h1 align="center">MOTIP-BCPR</h1>
+
+<p align="center">
+  A runnable BCPR implementation built on <i>Multiple Object Tracking as ID Prediction</i> (MOTIP)
+</p>
+
+## BCPR at a glance
+
+This repository is a complete training and inference codebase, not a standalone
+network snippet. BCPR adds a learned observation-wise bias to MOTIP's historical
+cross-attention and trains the association decoder through matched OFF/ON endpoints:
+
+```text
+OFF: alpha = 0                    -> original MOTIP attention
+ON : alpha = BCPR_ON_ALPHA       -> MOTIP attention + BCPR bias
+L_ID = 0.5 * L_OFF + 0.5 * L_ON
+```
+
+The repository includes:
+
+- the public BCPR network in `models/motip/bcpr.py` and its shared implementation
+  in `models/motip/bcpr_base.py`;
+- BCPR integration in the trajectory model and ID decoder;
+- gradient-enabled dual-path training in `train.py`;
+- DanceTrack and BFT training/evaluation configs;
+- CPU regression tests for no-op initialization, masking, centering, gradient flow,
+  and decoder injection.
+
+See [docs/BCPR.md](./docs/BCPR.md) for dataset layout, pretrained detector setup,
+exact commands, evaluation, and checkpoint behavior.
+
+### Minimal commands
+
+```bash
+# BFT training on two GPUs
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes 2 train.py \
+  --config-path configs/bcpr_bft.yaml
+
+# BFT test evaluation at alpha=0.75
+CUDA_VISIBLE_DEVICES=0 python submit_and_evaluate.py \
+  --config-path configs/bcpr_bft_eval.yaml \
+  --inference-model outputs/bcpr_bft_seed42/checkpoint_21.pth \
+  --bcpr-alpha 0.75
+
+# CPU regression tests
+CUDA_VISIBLE_DEVICES='' python -m pytest -q tests/test_bcpr_core.py tests/test_bcpr_decoder.py
+```
+
+Equivalent wrappers are available under `scripts/`, for example
+`scripts/train_bft.sh` and `scripts/eval_bft.sh CHECKPOINT 0.75`.
+
+## Upstream MOTIP
+
+The base tracker and most of this repository originate from the official
+[MCG-NJU/MOTIP](https://github.com/MCG-NJU/MOTIP) implementation. The original
+project information is retained below, and its license remains applicable.
+
+<h2 align="center">
   <i>Multiple Object Tracking as ID Prediction</i>
-</h1>
+</h2>
 
 <p align="center">
   <a href="https://ruopenggao.com" target='_blank'>Ruopeng Gao</a>,&nbsp;

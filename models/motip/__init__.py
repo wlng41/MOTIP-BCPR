@@ -55,6 +55,7 @@ def build(config: dict):
         feature_dim=config["FEATURE_DIM"],
     ) if config["ONLY_DETR"] is False else None
     # 2. ID decoder:
+    use_bcpr = bool(config.get("USE_BCPR", False))
     _id_decoder = IDDecoder(
         feature_dim=config["FEATURE_DIM"],
         id_dim=config["ID_DIM"],
@@ -65,6 +66,21 @@ def build(config: dict):
         rel_pe_length=config["REL_PE_LENGTH"],
         use_aux_loss=config["USE_AUX_LOSS"],
         use_shared_aux_head=config["USE_SHARED_AUX_HEAD"],
+        bcpr_config={
+            "ENABLED": use_bcpr,
+            "PROJ_DIM": config.get("BCPR_PROJ_DIM", 64),
+            "HIDDEN_DIM": config.get("BCPR_HIDDEN_DIM", 64),
+            "LAMBDA": config.get("BCPR_LAMBDA", 1.0),
+            "TAU": config.get("BCPR_TAU", 1.0),
+            "USE_COMPETITOR": config.get("BCPR_USE_COMPETITOR", True),
+            "SHUFFLE_CONTROL": config.get("BCPR_SHUFFLE_CONTROL", False),
+            "CHUNK_QUERIES": config.get("BCPR_CHUNK_QUERIES", 32),
+            "USE_QH": config.get("BCPR_USE_QH", True),
+            "USE_OWN": config.get("BCPR_USE_OWN", True),
+            "USE_HC": config.get("BCPR_USE_HC", True),
+            "USE_QC": config.get("BCPR_USE_QC", True),
+            "ALPHA": config.get("BCPR_ALPHA", 1.0),
+        },
     ) if config["ONLY_DETR"] is False else None
 
     # Construct MOTIP model:

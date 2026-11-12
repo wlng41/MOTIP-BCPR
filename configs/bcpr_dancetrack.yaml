@@ -1,0 +1,47 @@
+SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
+
+# BCPR observation-wise attention refinement
+USE_BCPR: True
+BCPR_PROJ_DIM: 64
+BCPR_HIDDEN_DIM: 64
+BCPR_LAMBDA: 1.0
+BCPR_TAU: 1.0
+BCPR_USE_COMPETITOR: True
+BCPR_SHUFFLE_CONTROL: False
+BCPR_CHUNK_QUERIES: 16
+BCPR_USE_QH: True
+BCPR_USE_OWN: True
+BCPR_USE_HC: True
+BCPR_USE_QC: True
+BCPR_ALPHA: 1.0
+
+# BCPR dual-path identity objective:
+# L_ID = 0.5 * L_OFF(alpha=0) + 0.5 * L_ON(alpha=BCPR_ON_ALPHA)
+BCPR_DUAL_PATH: True
+BCPR_ON_ALPHA: 1.0
+BCPR_OFF_LOSS_WEIGHT: 0.5
+BCPR_ON_LOSS_WEIGHT: 0.5
+
+# Training recipe
+SEED: 42
+DETR_PRETRAIN: ./pretrains/r50_deformable_detr_coco_dancetrack.pth
+RESUME_MODEL:
+RESUME_OPTIMIZER: False
+RESUME_SCHEDULER: False
+RESUME_STATES: False
+USE_DECODER_CHECKPOINT: True
+BATCH_SIZE: 1
+ACCUMULATE_STEPS: 4
+EPOCHS: 10
+LR: 1.0e-4
+LR_WARMUP_EPOCHS: 1
+SCHEDULER_MILESTONES: [6, 9]
+SCHEDULER_GAMMA: 0.1
+WEIGHT_DECAY: 0.0005
+MAX_CLIP_NORM: 0.1
+SAVE_CHECKPOINT_PER_EPOCH: 1
+
+OUTPUTS_DIR: ./outputs/bcpr_dancetrack_seed42
+EXP_GROUP: bcpr
+EXP_NAME: bcpr_dancetrack_seed42
+USE_WANDB: False

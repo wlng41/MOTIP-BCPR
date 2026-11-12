@@ -2,3 +2,19 @@
 
 # PyCharm
 .idea/
+
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local datasets, weights, and experiment artifacts
+datasets
+pretrains
+outputs/
+*.pth
+*.pt
+
+# Local editor and OS files
+.vscode/
+.DS_Store

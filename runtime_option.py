@@ -73,6 +73,11 @@ def runtime_option():
     parser.add_argument("--rel-pe-length", type=int)
     parser.add_argument("--id-dim", type=int)
     parser.add_argument("--num-id-decoder-layers", type=int)
+    parser.add_argument("--bcpr-alpha", type=float)
+    parser.add_argument("--bcpr-on-alpha", type=float)
+    parser.add_argument("--bcpr-dual-path", type=str)
+    parser.add_argument("--bcpr-off-loss-weight", type=float)
+    parser.add_argument("--bcpr-on-loss-weight", type=float)
 
     # About inference.
     parser.add_argument("--inference-model", type=str, help="Inference model path.")

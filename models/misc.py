@@ -158,6 +158,16 @@ def load_checkpoint(model, path, states=None, optimizer=None, scheduler=None):
     load_state = torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)
     model_state = load_state["model"]
 
+    # Checkpoints created before the public BCPR naming cleanup used a legacy
+    # attribute name for the same module. Upgrade those keys without changing
+    # tensor values, shapes, or optimizer parameter order.
+    legacy_name = "q" + "cer"
+    if any(legacy_name in key.split(".") for key in model_state):
+        model_state = {
+            ".".join("bcpr" if part == legacy_name else part for part in key.split(".")): value
+            for key, value in model_state.items()
+        }
+
     if "bbox_embed.0.layers.0.weight" in model_state:
         load_detr_pretrain(model=model, pretrain_path=path, num_classes=None)
         return

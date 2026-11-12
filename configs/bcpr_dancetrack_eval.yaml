@@ -1,0 +1,12 @@
+SUPER_CONFIG_PATH: ./configs/bcpr_dancetrack.yaml
+
+# Supply the checkpoint with --inference-model.
+INFERENCE_MODEL:
+INFERENCE_DATASET: DanceTrack
+INFERENCE_SPLIT: val
+INFERENCE_MODE: evaluate
+INFERENCE_GROUP: bcpr_dancetrack
+
+# Evaluation does not use the training dual-path objective.
+BCPR_DUAL_PATH: False
+BCPR_ALPHA: 0.75

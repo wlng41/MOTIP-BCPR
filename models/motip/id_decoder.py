@@ -22,6 +22,7 @@ class IDDecoder(nn.Module):
             rel_pe_length: int,
             use_aux_loss: bool,
             use_shared_aux_head: bool,
+            bcpr_config: dict | None = None,
     ):
         super().__init__()
 
@@ -91,6 +92,29 @@ class IDDecoder(nn.Module):
             if p.dim() > 1 and "rel_pos_embeds" not in n:
                 nn.init.xavier_uniform_(p)
 
+        # BCPR observation-wise history bias. It is attached after the decoder's
+        # Xavier sweep so the module's zero-initialized output layer remains an
+        # exact no-op at construction.
+        self.bcpr = None
+        self._bcpr_alpha = 1.0
+        if bcpr_config is not None and bcpr_config.get("ENABLED", False):
+            from models.motip.bcpr import BCPR
+            self.bcpr = BCPR(
+                feature_dim=self.feature_dim,
+                proj_dim=int(bcpr_config.get("PROJ_DIM", 64)),
+                hidden_dim=int(bcpr_config.get("HIDDEN_DIM", 64)),
+                lam=float(bcpr_config.get("LAMBDA", 1.0)),
+                tau_init=float(bcpr_config.get("TAU", 1.0)),
+                use_competitor=bool(bcpr_config.get("USE_COMPETITOR", True)),
+                chunk_queries=int(bcpr_config.get("CHUNK_QUERIES", 32)),
+                shuffle_control=bool(bcpr_config.get("SHUFFLE_CONTROL", False)),
+                use_qh=bool(bcpr_config.get("USE_QH", True)),
+                use_own=bool(bcpr_config.get("USE_OWN", True)),
+                use_hc=bool(bcpr_config.get("USE_HC", True)),
+                use_qc=bool(bcpr_config.get("USE_QC", True)),
+            )
+            self._bcpr_alpha = float(bcpr_config.get("ALPHA", 1.0))
+
         pass
 
     def forward(self, seq_info, use_decoder_checkpoint):
@@ -117,6 +141,7 @@ class IDDecoder(nn.Module):
         _trajectory_times_flatten = einops.rearrange(trajectory_times, "b g t n -> (b g) (t n)")
         _unknown_times_flatten = einops.rearrange(unknown_times, "b g t n -> (b g) (t n)")
         cross_attn_mask = _trajectory_times_flatten[:, None, :] >= _unknown_times_flatten[:, :, None]
+        bcpr_visible = ~cross_attn_mask if self.bcpr is not None else None
         cross_attn_mask = einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=self.n_heads).contiguous()
         # Prepare for rel PE:
         self.rel_pos_map = self.rel_pos_map.to(trajectory_features.device)
@@ -140,6 +165,40 @@ class IDDecoder(nn.Module):
             mask=cross_attn_mask,
             value=float("-inf"),
         ).to(self.dtype)
+
+        # BCPR injects one centered scalar per current-query/history-key pair.
+        # Padding and causality remain authoritative because the bias is zero on
+        # invalid keys and is added after the -inf masks are constructed.
+        if self.bcpr is not None:
+            history_raw = seq_info.get("trajectory_features_pre_adapter")
+            if history_raw is None:
+                raise RuntimeError(
+                    "BCPR requires trajectory_features_pre_adapter; run trajectory_modeling first.")
+            q_feat = einops.rearrange(
+                unknown_features, "b g t n d -> (b g) (t n) d")
+            h_feat = einops.rearrange(
+                history_raw, "b g t n d -> (b g) (t n) d")
+            valid = ~einops.rearrange(
+                trajectory_masks, "b g t n -> (b g) (t n)")
+            track_id = torch.arange(_N, device=h_feat.device).repeat(_T)[None, :]
+            track_id = track_id.expand(_B * _G, -1).clone()
+            track_id = torch.where(valid, track_id, torch.full_like(track_id, -1))
+            bcpr_bias = self.bcpr(
+                q_feat=q_feat,
+                h_feat=h_feat,
+                valid=valid,
+                track_id=track_id,
+                times=_trajectory_times_flatten,
+                query_time=_unknown_times_flatten,
+                causal=bcpr_visible,
+            )
+            if self._bcpr_alpha != 1.0:
+                bcpr_bias = bcpr_bias * self._bcpr_alpha
+            cross_attn_mask = cross_attn_mask + einops.repeat(
+                bcpr_bias,
+                "bg q k -> (bg n_heads) q k",
+                n_heads=self.n_heads,
+            ).to(cross_attn_mask.dtype)
         pass
 
         all_unknown_id_logits = None

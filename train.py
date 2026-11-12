@@ -183,6 +183,10 @@ def train_engine(config: dict):
             separate_clip_norm=config.get("SEPARATE_CLIP_NORM", True),
             max_clip_norm=config.get("MAX_CLIP_NORM", 0.1),
             use_accelerate_clip_norm=config.get("USE_ACCELERATE_CLIP_NORM", True),
+            bcpr_dual_path=config.get("BCPR_DUAL_PATH", False),
+            bcpr_on_alpha=config.get("BCPR_ON_ALPHA", config.get("BCPR_ALPHA", 1.0)),
+            bcpr_off_weight=config.get("BCPR_OFF_LOSS_WEIGHT", 0.5),
+            bcpr_on_weight=config.get("BCPR_ON_LOSS_WEIGHT", 0.5),
             # For multi last checkpoints:
             outputs_dir=outputs_dir,
             is_last_epochs=(epoch == config["EPOCHS"] - 1),
@@ -279,6 +283,10 @@ def train_one_epoch(
         separate_clip_norm: bool = True,
         max_clip_norm: float = 0.1,
         use_accelerate_clip_norm: bool = True,
+        bcpr_dual_path: bool = False,
+        bcpr_on_alpha: float = 1.0,
+        bcpr_off_weight: float = 0.5,
+        bcpr_on_weight: float = 0.5,
         logging_interval: int = 20,
         # For multi last checkpoints:
         outputs_dir: str = None,
@@ -419,12 +427,51 @@ def train_one_epoch(
                 detr_outputs=detr_outputs, annotations=annotations, detr_indices=detr_indices,
             )
             seq_info = model(seq_info=seq_info, part="trajectory_modeling")
-            id_logits, id_gts, id_masks = model(
-                seq_info=seq_info,
-                part="id_decoder",
-                use_decoder_checkpoint=use_decoder_checkpoint,
-            )
-            id_loss = id_criterion(id_logits=id_logits, id_labels=id_gts, id_masks=id_masks)
+            if bcpr_dual_path:
+                if model_without_ddp.id_decoder.bcpr is None:
+                    raise RuntimeError("BCPR_DUAL_PATH requires USE_BCPR=True.")
+                if bcpr_off_weight < 0 or bcpr_on_weight < 0 \
+                        or abs(bcpr_off_weight + bcpr_on_weight - 1.0) >= 1e-12:
+                    raise ValueError("BCPR OFF/ON weights must be non-negative and sum to one.")
+                if bcpr_on_alpha < 0:
+                    raise ValueError("BCPR_ON_ALPHA must be non-negative.")
+                saved_alpha = model_without_ddp.id_decoder._bcpr_alpha
+                try:
+                    model_without_ddp.id_decoder._bcpr_alpha = 0.0
+                    id_logits_off, id_gts_off, id_masks_off = model(
+                        seq_info=seq_info,
+                        part="id_decoder",
+                        use_decoder_checkpoint=use_decoder_checkpoint,
+                    )
+                    model_without_ddp.id_decoder._bcpr_alpha = float(bcpr_on_alpha)
+                    id_logits_on, id_gts_on, id_masks_on = model(
+                        seq_info=seq_info,
+                        part="id_decoder",
+                        use_decoder_checkpoint=use_decoder_checkpoint,
+                    )
+                finally:
+                    model_without_ddp.id_decoder._bcpr_alpha = saved_alpha
+                if not torch.equal(id_gts_off, id_gts_on):
+                    raise RuntimeError("BCPR OFF/ON identity targets differ.")
+                if not torch.equal(id_masks_off, id_masks_on):
+                    raise RuntimeError("BCPR OFF/ON validity masks differ.")
+                if id_logits_off.shape != id_logits_on.shape:
+                    raise RuntimeError("BCPR OFF/ON candidate columns differ.")
+                id_loss_off = id_criterion(
+                    id_logits=id_logits_off, id_labels=id_gts_off, id_masks=id_masks_off)
+                id_loss_on = id_criterion(
+                    id_logits=id_logits_on, id_labels=id_gts_on, id_masks=id_masks_on)
+                id_loss = bcpr_off_weight * id_loss_off + bcpr_on_weight * id_loss_on
+                id_logits, id_gts, id_masks = id_logits_on, id_gts_on, id_masks_on
+            else:
+                id_logits, id_gts, id_masks = model(
+                    seq_info=seq_info,
+                    part="id_decoder",
+                    use_decoder_checkpoint=use_decoder_checkpoint,
+                )
+                id_loss = id_criterion(
+                    id_logits=id_logits, id_labels=id_gts, id_masks=id_masks)
+                id_loss_off = id_loss_on = None
             _num_gts_per_frame = max(_num_gts_per_frame, id_gts.shape[-1])
             # print(f"Num of GTs per frame: {_num_gts_per_frame}")
             pass
@@ -443,6 +490,23 @@ def train_one_epoch(
             metrics.update(name="detr_loss", value=detr_loss.item())
             if id_loss is not None:
                 metrics.update(name="id_loss", value=id_loss.item())
+                if id_loss_off is not None:
+                    metrics.update(name="bcpr/id_loss_off", value=id_loss_off.item())
+                    metrics.update(name="bcpr/id_loss_on", value=id_loss_on.item())
+                    metrics.update(
+                        name="bcpr/loss_gap", value=(id_loss_on - id_loss_off).item())
+                    with torch.no_grad():
+                        delta = id_logits_on - id_logits_off
+                        valid_logits = ~id_masks_on
+                        metrics.update(
+                            name="bcpr/logit_absdelta",
+                            value=(delta.abs()[valid_logits].mean().item()
+                                   if bool(valid_logits.any()) else 0.0))
+                        metrics.update(
+                            name="bcpr/argmax_changed",
+                            value=(((id_logits_on.argmax(-1) != id_logits_off.argmax(-1))
+                                    & valid_logits).float().sum()
+                                   / valid_logits.float().sum().clamp_min(1)).item())
             for k, v in detr_loss_dict.items():
                 metrics.update(name=k, value=v.item())
             loss /= accumulate_steps
