@@ -4,6 +4,12 @@
   A runnable BCPR implementation built on <i>Multiple Object Tracking as ID Prediction</i> (MOTIP)
 </p>
 
+<p align="center">
+  <img src="./docs/assets/bcpr_architecture.png" alt="BCPR architecture" width="100%">
+</p>
+
+<p align="center"><i>BCPR architecture and observation-wise attention-bias generation.</i></p>
+
 ## BCPR at a glance
 
 This repository is a complete training and inference codebase, not a standalone
