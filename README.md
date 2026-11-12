@@ -1,7 +1,12 @@
-<h1 align="center">MOTIP-BCPR</h1>
+<h1 align="center">BCPR</h1>
 
 <p align="center">
-  A runnable BCPR implementation built on <i>Multiple Object Tracking as ID Prediction</i> (MOTIP)
+  <b>Observation-wise relational attention refinement for identity association</b>
+</p>
+
+<p align="center">
+  BCPR evaluates how useful each historical observation is for the current query
+  and injects a learned, signed bias into the identity decoder's cross-attention.
 </p>
 
 <p align="center">
@@ -10,129 +15,213 @@
 
 <p align="center"><i>BCPR architecture and observation-wise attention-bias generation.</i></p>
 
-## BCPR at a glance
+## Overview
 
-This repository is a complete training and inference codebase, not a standalone
-network snippet. BCPR adds a learned observation-wise bias to MOTIP's historical
-cross-attention and trains the association decoder through matched OFF/ON endpoints:
+Identity association becomes difficult when historical observations are affected by
+occlusion, appearance changes, or visually similar competitors. Treating every stored
+observation equally can propagate ambiguous evidence into the current prediction.
+
+BCPR addresses this problem by estimating an observation-wise relational bias for every
+current-query/history pair. The model jointly considers:
+
+- **Query–history correspondence:** whether a historical observation matches the current
+  detection;
+- **Own-track consistency:** whether the observation remains consistent with its causal
+  track history;
+- **Competitor context:** whether the observation is discriminative against other active
+  identities;
+- **Temporal and validity information:** how old the observation is and whether it is
+  visible to the current query.
+
+The resulting scalar bias is row-centered over valid historical observations and added
+directly to the cross-attention logits:
 
 ```text
-OFF: alpha = 0                    -> original MOTIP attention
-ON : alpha = BCPR_ON_ALPHA       -> MOTIP attention + BCPR bias
-L_ID = 0.5 * L_OFF + 0.5 * L_ON
+L_base = QK^T / sqrt(d_k) + mask
+L_BCPR = L_base + alpha * B
 ```
 
-The repository includes:
+Positive values promote useful observations, while negative values suppress ambiguous
+or competitor-like evidence. Padding and causal masks always remain authoritative.
 
-- the public BCPR network in `models/motip/bcpr.py` and its shared implementation
-  in `models/motip/bcpr_base.py`;
-- BCPR integration in the trajectory model and ID decoder;
-- gradient-enabled dual-path training in `train.py`;
-- DanceTrack and BFT training/evaluation configs;
-- CPU regression tests for no-op initialization, masking, centering, gradient flow,
-  and decoder injection.
+## Method highlights
 
-See [docs/BCPR.md](./docs/BCPR.md) for dataset layout, pretrained detector setup,
-exact commands, evaluation, and checkpoint behavior.
+- **Observation-wise refinement:** generates one signed bias per query/history pair
+  instead of reducing a track to a single pooled feature.
+- **Query-conditioned competitor reading:** summarizes competing tracks in a learned
+  projection space with `O(Q*K*d)` relational computation.
+- **Length-neutral competitor threat:** uses log-mean-exp aggregation so duplicated or
+  longer histories do not receive larger weight merely because they contain more
+  observations.
+- **Causal own-track consistency:** constructs track statistics only from observations
+  visible at the query time.
+- **Stable attention injection:** applies bounded `tanh` bias and valid-key row centering
+  without weakening the original masks.
+- **Exact no-op initialization:** the final bias layer is zero-initialized, so enabling
+  BCPR initially preserves the base decoder output.
+- **Matched dual-path training:** OFF and ON endpoints share the same query, history,
+  targets, candidate columns, and decoder parameters.
 
-### Minimal commands
+## Dual-path identity objective
+
+BCPR is trained with matched OFF/ON association endpoints:
+
+```text
+OFF: alpha = 0                  -> base identity association
+ON : alpha = BCPR_ON_ALPHA     -> base association + BCPR bias
+
+L_ID = w_off * L_OFF + w_on * L_ON
+```
+
+The provided configs use `w_off = 0.5`, `w_on = 0.5`, and training alpha `1.0`.
+Inference alpha is independent and can be selected with `--bcpr-alpha`.
+
+## Reproduced BFT result
+
+The verified BFT run uses epoch 21 and inference alpha `0.75`:
+
+| HOTA | DetA | AssA | MOTA | IDF1 |
+|---:|---:|---:|---:|---:|
+| **71.174** | 69.772 | **72.841** | 77.125 | **83.059** |
+
+The trained checkpoint is not redistributed in this source repository. Its provenance
+and strict-load audit are recorded in [the release manifest](./docs/RELEASE_MANIFEST.md).
+
+## Installation
+
+Create the tracking environment and compile the multi-scale deformable-attention
+operator by following [docs/INSTALL.md](./docs/INSTALL.md). Prepare DanceTrack or BFT
+using [docs/DATASET.md](./docs/DATASET.md), then place the detector initialization files
+under `pretrains/` as described in [docs/BCPR.md](./docs/BCPR.md).
+
+Expected local paths:
+
+```text
+datasets/
+├── DanceTrack/
+└── BFT/
+
+pretrains/
+├── r50_deformable_detr_coco_dancetrack.pth
+└── r50_deformable_detr_coco_bft.pth
+```
+
+Datasets, detector weights, trained checkpoints, and experiment outputs are excluded
+from Git.
+
+## Training
+
+Run commands from the repository root.
+
+### BFT
 
 ```bash
-# BFT training on two GPUs
 CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes 2 train.py \
   --config-path configs/bcpr_bft.yaml
+```
 
-# BFT test evaluation at alpha=0.75
+### DanceTrack
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes 2 train.py \
+  --config-path configs/bcpr_dancetrack.yaml
+```
+
+Equivalent wrappers are available as `scripts/train_bft.sh` and
+`scripts/train_dancetrack.sh`.
+
+## Evaluation
+
+### BFT test at alpha 0.75
+
+```bash
 CUDA_VISIBLE_DEVICES=0 python submit_and_evaluate.py \
   --config-path configs/bcpr_bft_eval.yaml \
   --inference-model outputs/bcpr_bft_seed42/checkpoint_21.pth \
   --bcpr-alpha 0.75
-
-# CPU regression tests
-CUDA_VISIBLE_DEVICES='' python -m pytest -q tests/test_bcpr_core.py tests/test_bcpr_decoder.py
 ```
 
-Equivalent wrappers are available under `scripts/`, for example
-`scripts/train_bft.sh` and `scripts/eval_bft.sh CHECKPOINT 0.75`.
+### OFF/ON comparison
 
-## Upstream MOTIP
+```bash
+# BCPR OFF
+CUDA_VISIBLE_DEVICES=0 python submit_and_evaluate.py \
+  --config-path configs/bcpr_bft_eval.yaml \
+  --inference-model outputs/bcpr_bft_seed42/checkpoint_21.pth \
+  --bcpr-alpha 0.0 --inference-group bcpr_off
 
-The base tracker and most of this repository originate from the official
-[MCG-NJU/MOTIP](https://github.com/MCG-NJU/MOTIP) implementation. The original
-project information is retained below, and its license remains applicable.
-
-<h2 align="center">
-  <i>Multiple Object Tracking as ID Prediction</i>
-</h2>
-
-<p align="center">
-  <a href="https://ruopenggao.com" target='_blank'>Ruopeng Gao</a>,&nbsp;
-  Ji Qi,&nbsp;
-  <a href="https://wanglimin.github.io/" target='_blank'>Limin Wang</a>,&nbsp;
-  <br>
-  Nanjing University <br>
-  📧 Primary Contact: ruopenggao@gmail.com
-</p>
-
-<p align="center">
-  <a href="https://arxiv.org/abs/2403.16848" target='_blank'>
-    <img alt="Static Badge" src="https://img.shields.io/badge/arXiv-2403.16848-b31b1b?style=flat-square">
-  </a>
-  <a href="https://openaccess.thecvf.com/content/CVPR2025/html/Gao_Multiple_Object_Tracking_as_ID_Prediction_CVPR_2025_paper.html">
-    <img alt="Static Badge" src="https://img.shields.io/badge/CVPR 2025-%F0%9F%92%A1-%235E86C1?style=flat-square">
-  </a>
-  <a href="https://zhuanlan.zhihu.com/p/1907113772465759166">
-    <img alt="Static Badge" src="https://img.shields.io/badge/%E7%9F%A5%E4%B9%8E%E8%A7%A3%E8%AF%BB-%F0%9F%93%96-blue?style=flat-square">
-  </a>
-</p>
-
-
-## :mag: Overview
-
-**TL; DR.** We propose a novel perspective to ***regard the multiple object tracking task as an in-context ID prediction problem***. Given a set of trajectories carried with ID information, MOTIP directly decodes the ID labels for current detections, which is straightforward and effective.
-
-![Overview](./assets/overview.png)
-
-
-## :fire: News
-
-- <span style="font-variant-numeric: tabular-nums;">**2025.07.10**</span>: Thanks everyone—we’ve hit 300 stars :tada:! A new [TUTORIAL](./docs/TUTORIAL.md) (is updating gradually) is live to help understand and work with the model.
-- <span style="font-variant-numeric: tabular-nums;">**2025.04.11**</span>: Support loading previous MOTIP checkpoints from the [prev-engine](https://github.com/MCG-NJU/MOTIP/tree/prev-engine) to inference :floppy_disk:. See [MODEL_ZOO](./docs/MODEL_ZOO.md) for details.
-- <span style="font-variant-numeric: tabular-nums;">**2025.04.06**</span>: Now, you can use the [video demo](./demo/video_process.ipynb) to perform nearly real-time tracking on your videos :joystick:.
-- <span style="font-variant-numeric: tabular-nums;">**2025.04.05**</span>: We support FP16 for faster inference :racing_car:.
-- <span style="font-variant-numeric: tabular-nums;">**2025.04.03**</span>: The new codebase is released :tada:. Compared to the previous version, it is more concise and efficient :rocket:. Feel free to enjoy it!
-- <span style="font-variant-numeric: tabular-nums;">**2025.03.25**</span>: Our revised paper is released at [arXiv:2403.16848](https://arxiv.org/abs/2403.16848). The latest codebase is being organized :construction:.
-- <span style="font-variant-numeric: tabular-nums;">**2025.02.27**</span>: Our paper is accepted by CVPR 2025 :tada: :tada:. The revised paper and a more efficient codebase will be released in March. Almost there :nerd_face: ~
-- <span style="font-variant-numeric: tabular-nums;">**2024.03.26**</span>: The first version of our paper is released at [arXiv:2403.16848v1](https://arxiv.org/abs/2403.16848v1) :pushpin:. The corresponding codebase is stored in the [prev-engine branch](https://github.com/MCG-NJU/MOTIP/tree/prev-engine) (No longer maintained starting April 2025 :no_entry:).
-
-## :dash: Quick Start
-
-- See [INSTALL.md](./docs/INSTALL.md) for instructions of installing required components.
-- See [DATASET.md](./docs/DATASET.md) for datasets download and preparation.
-- See [GET_STARTED.md](./docs/GET_STARTED.md) for how to get started with our MOTIP, including pre-training, training, and inference.
-- See [MODEL_ZOO.md](./docs/MODEL_ZOO.md) for well-trained models.
-- See [MISCELLANEOUS.md](./docs/MISCELLANEOUS.md) for other miscellaneous settings unrelated to the model structure, such as logging.
-- See [TUTORIAL.md](./docs/TUTORIAL.md) to understand and better develop our models.
-
-## :bouquet: Acknowledgements
-
-This project is built upon [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR), [MOTR](https://github.com/megvii-research/MOTR), [TrackEval](https://github.com/JonathonLuiten/TrackEval). Thanks to the contributors of these great codebases.
-
-## :pencil2: Citation
-
-If you think this project is helpful, please feel free to leave a :star: and cite our paper:
-
-```tex
-@InProceedings{{MOTIP},
-    author    = {Gao, Ruopeng and Qi, Ji and Wang, Limin},
-    title     = {Multiple Object Tracking as ID Prediction},
-    booktitle = {Proceedings of the Computer Vision and Pattern Recognition Conference (CVPR)},
-    month     = {June},
-    year      = {2025},
-    pages     = {27883-27893}
-}
+# BCPR ON
+CUDA_VISIBLE_DEVICES=0 python submit_and_evaluate.py \
+  --config-path configs/bcpr_bft_eval.yaml \
+  --inference-model outputs/bcpr_bft_seed42/checkpoint_21.pth \
+  --bcpr-alpha 0.75 --inference-group bcpr_on_alpha075
 ```
 
-## :star2: Stars
+The evaluation wrappers accept a checkpoint and optional alpha:
 
-[![Star History Chart](https://api.star-history.com/svg?repos=MCG-NJU/MOTIP&type=Date)](https://star-history.com/#MCG-NJU/MOTIP&Date)
+```bash
+scripts/eval_bft.sh CHECKPOINT 0.75
+scripts/eval_dancetrack.sh CHECKPOINT 0.75
+```
+
+## Monitoring and regression tests
+
+```bash
+tail -F outputs/bcpr_bft_seed42/train/log.txt \
+  | grep --line-buffered -E '\[Metrics\]|bcpr/'
+```
+
+```bash
+CUDA_VISIBLE_DEVICES='' python -m pytest -q \
+  tests/test_bcpr_core.py tests/test_bcpr_decoder.py
+```
+
+The regression suite checks no-op initialization, masking, row centering, causal
+behavior, gradient flow, and decoder injection. Validate a complete local setup before
+a long run with:
+
+```bash
+CUDA_VISIBLE_DEVICES='' python tools/check_bcpr_setup.py \
+  --config-path configs/bcpr_bft.yaml
+```
+
+## Repository structure
+
+| Path | Description |
+|---|---|
+| `models/motip/bcpr.py` | Public BCPR module with causal consistency and length-neutral threat |
+| `models/motip/bcpr_base.py` | Shared relational projection and bias-generation implementation |
+| `models/motip/id_decoder.py` | Cross-attention bias injection |
+| `models/motip/trajectory_modeling.py` | Raw query/history feature routing |
+| `train.py` | Matched OFF/ON dual-path identity objective |
+| `configs/bcpr_*.yaml` | BFT and DanceTrack train/evaluation settings |
+| `scripts/` | Reproducible training and evaluation wrappers |
+| `tests/` | CPU regression tests |
+| `tools/check_bcpr_setup.py` | Dataset, config, model, and checkpoint preflight audit |
+
+For detailed dataset layout, checkpoint migration, resume behavior, and complete
+commands, see [docs/BCPR.md](./docs/BCPR.md).
+
+## Checkpoint compatibility
+
+BCPR checkpoints use the `id_decoder.bcpr.*` state namespace. The loader includes an
+automatic migration path for checkpoints produced before the public BCPR naming cleanup.
+Fresh training configs do not auto-resume and load only the dataset-specific detector
+initialization unless an explicit resume checkpoint is supplied.
+
+## Scope
+
+This repository contains the BCPR method and its complete training/inference path.
+Later experimental association modules are intentionally excluded so the public code,
+software-registration artifact, and documented results refer to one consistent method.
+
+## Acknowledgements and license
+
+BCPR is implemented on the identity-prediction tracking framework from
+[MCG-NJU/MOTIP](https://github.com/MCG-NJU/MOTIP). The tracking foundation also uses
+[Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR),
+[MOTR](https://github.com/megvii-research/MOTR), and
+[TrackEval](https://github.com/JonathonLuiten/TrackEval).
+
+The upstream license remains applicable. See [LICENSE](./LICENSE) and
+[NOTICE](./NOTICE) for attribution and redistribution details.
